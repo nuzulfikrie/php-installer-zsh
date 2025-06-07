@@ -1,0 +1,1 @@
+# php-installer-zsh
