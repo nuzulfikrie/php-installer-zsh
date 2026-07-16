@@ -109,10 +109,46 @@ run_cmd apt install -y "${SYSTEM_PACKAGES[@]}" || {
     exit 1
 }
 
-if ! grep -q "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
-    log "INFO" "Adding PHP PPA..."
-    run_cmd add-apt-repository -y ppa:ondrej/php
-    run_cmd apt update
+# ---- PHP repository setup ----
+# The ondrej/php PPA is being merged into packages.sury.org/php and, per its own
+# notice, only reliably serves Jammy (22.04) and Noble (24.04) going forward.
+# Anything newer (e.g. Resolute) 404s on the PPA, so use sury.org's repo directly
+# for those, falling back to Noble packages as a last resort if the exact
+# codename isn't published there yet either.
+UBUNTU_CODENAME=$(lsb_release -sc 2>/dev/null || . /etc/os-release && echo "$VERSION_CODENAME")
+PPA_SUPPORTED_CODENAMES=("jammy" "noble")
+
+is_ppa_supported() {
+    local codename=$1
+    for c in "${PPA_SUPPORTED_CODENAMES[@]}"; do
+        [ "$c" = "$codename" ] && return 0
+    done
+    return 1
+}
+
+add_sury_repo() {
+    local codename=$1
+    log "INFO" "Adding packages.sury.org repository for $codename..."
+    run_cmd apt install -y apt-transport-https lsb-release ca-certificates curl
+    run_cmd curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
+    echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $codename main" | run_cmd tee /etc/apt/sources.list.d/php.list > /dev/null
+}
+
+if ! grep -q "ondrej/php\|packages.sury.org" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+    if is_ppa_supported "$UBUNTU_CODENAME"; then
+        log "INFO" "Adding PHP PPA (ondrej/php) for $UBUNTU_CODENAME..."
+        run_cmd add-apt-repository -y ppa:ondrej/php
+        run_cmd apt update
+    else
+        log "WARNING" "Ubuntu '$UBUNTU_CODENAME' is not (yet) covered by ondrej/php PPA — using packages.sury.org instead"
+        add_sury_repo "$UBUNTU_CODENAME"
+        if ! run_cmd apt update; then
+            log "WARNING" "sury.org has no '$UBUNTU_CODENAME' packages yet — falling back to 'noble' packages (may be slightly behind, but installable on newer Ubuntu bases)"
+            rm -f /etc/apt/sources.list.d/php.list
+            add_sury_repo "noble"
+            run_cmd apt update
+        fi
+    fi
 fi
 
 install_composer() {
